@@ -1,4 +1,25 @@
+import os
 from pathlib import Path
+
+
+SUPPORTED_EXTENSIONS = {
+    ".py",
+    ".cpp",
+    ".hpp",
+    ".h",
+    ".java",
+    ".js",
+    ".ts",
+}
+
+IGNORED_DIRECTORIES = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "build",
+    "dist",
+}
 
 
 def scan_repository(repository_path: str) -> list[Path]:
@@ -10,8 +31,19 @@ def scan_repository(repository_path: str) -> list[Path]:
     if not root.is_dir():
         raise NotADirectoryError(f"Path is not a directory: {root}")
 
-    return [
-        path
-        for path in root.rglob("*")
-        if path.is_file()
-    ]
+    results = []
+
+    for current_dir, directories, files in os.walk(root):
+        directories[:] = [
+            directory
+            for directory in directories
+            if directory not in IGNORED_DIRECTORIES
+        ]
+
+        for filename in files:
+            path = Path(current_dir) / filename
+
+            if path.suffix in SUPPORTED_EXTENSIONS:
+                results.append(path)
+
+    return results

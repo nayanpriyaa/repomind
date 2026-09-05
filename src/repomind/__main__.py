@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from repomind.scanner import scan_repository
 
 
