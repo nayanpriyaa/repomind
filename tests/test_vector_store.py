@@ -83,3 +83,6 @@ def test_search_respects_top_k():
 
     assert len(results) == 2
     assert results[0][0].name == "authenticate"
+
+def test_delete_repository():
+  store = VectorStore()

@@ -1,5 +1,12 @@
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 
 class QdrantVectorStore:
@@ -63,3 +70,18 @@ class QdrantVectorStore:
             query=query_vector,
             limit=top_k,
         ).points
+
+    def delete_repository(self, repository_path: str) -> None:
+      self.client.delete(
+        collection_name=self.collection_name,
+        points_selector=Filter(
+            must=[
+                FieldCondition(
+                    key="repository_path",
+                    match=MatchValue(
+                        value=repository_path,
+                    ),
+                )
+            ]
+        ),
+    )
