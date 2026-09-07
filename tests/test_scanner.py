@@ -10,20 +10,19 @@ def test_scan_repository():
     with TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
 
-        # Supported source file
         (root / "main.py").touch()
-
-        # Unsupported file
         (root / "image.png").touch()
 
-        # Supported file inside an ignored directory
         venv_dir = root / ".venv"
         venv_dir.mkdir()
         (venv_dir / "fake.py").touch()
 
         results = scan_repository(str(root))
 
-        assert results == [root / "main.py"]
+        assert len(results) == 1
+        assert results[0].path == root / "main.py"
+        assert results[0].language == "python"
+        assert results[0].size == 0
 
 
 def test_scan_repository_nonexistent_path():
