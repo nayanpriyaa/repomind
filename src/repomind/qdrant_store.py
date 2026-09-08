@@ -61,15 +61,31 @@ class QdrantVectorStore:
         )
 
     def search(
-        self,
-        query_vector: list[float],
-        top_k: int = 5,
-    ):
-        return self.client.query_points(
-            collection_name=self.collection_name,
-            query=query_vector,
-            limit=top_k,
-        ).points
+      self,
+      query_vector: list[float],
+      top_k: int = 5,
+      repository_path: str | None = None,
+):
+      query_filter = None
+
+      if repository_path is not None:
+          query_filter = Filter(
+              must=[
+                  FieldCondition(
+                      key="repository_path",
+                      match=MatchValue(
+                          value=repository_path,
+                    ),
+                )
+            ]
+        )
+
+      return self.client.query_points(
+          collection_name=self.collection_name,
+          query=query_vector,
+          query_filter=query_filter,
+          limit=top_k,
+      ).points
 
     def delete_repository(self, repository_path: str) -> None:
       self.client.delete(
@@ -82,6 +98,31 @@ class QdrantVectorStore:
                         value=repository_path,
                     ),
                 )
+            ]
+        ),
+    )
+
+    def delete_file(
+    self,
+    repository_path: str,
+    file_path: str,
+) -> None:
+      self.client.delete(
+        collection_name=self.collection_name,
+        points_selector=Filter(
+            must=[
+                FieldCondition(
+                    key="repository_path",
+                    match=MatchValue(
+                        value=repository_path,
+                    ),
+                ),
+                FieldCondition(
+                    key="file_path",
+                    match=MatchValue(
+                        value=file_path,
+                    ),
+                ),
             ]
         ),
     )
