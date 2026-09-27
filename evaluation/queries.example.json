@@ -1,0 +1,21 @@
+{
+  "description": "Ground truth for retrieval evaluation. Relevance is judged at file granularity: list every file that genuinely answers the question. Replace these entries with questions about your own repository before drawing conclusions.",
+  "queries": [
+    {
+      "question": "Where is authentication implemented?",
+      "relevant_files": ["app/auth.py"]
+    },
+    {
+      "question": "How are session tokens issued and validated?",
+      "relevant_files": ["app/auth.py"]
+    },
+    {
+      "question": "Which module opens the database connection?",
+      "relevant_files": ["app/database.py"]
+    },
+    {
+      "question": "How do I install and run this project?",
+      "relevant_files": ["README.md"]
+    }
+  ]
+}

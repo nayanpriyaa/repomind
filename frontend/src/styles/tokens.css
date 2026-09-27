@@ -1,0 +1,73 @@
+:root {
+  /* Surfaces */
+  --bg: #12161d;
+  --surface: #181d26;
+  --surface-raised: #1e2430;
+  --surface-hover: #232a37;
+  --code-bg: #0e1218;
+  --border: #2a313d;
+  --border-strong: #3a4353;
+
+  /* Text */
+  --text: #e2e6ed;
+  --text-2: #aab2bf;
+  --text-muted: #737c8c;
+
+  /* Evidence marker: the one signature accent */
+  --marker: #e3ae4f;
+  --marker-strong: #f0c371;
+  --marker-wash: rgba(227, 174, 79, 0.1);
+  --marker-line: rgba(227, 174, 79, 0.16);
+
+  /* Status */
+  --success: #67c29c;
+  --success-wash: rgba(103, 194, 156, 0.1);
+  --warning: #d9a45a;
+  --error: #ec7b70;
+  --error-wash: rgba(236, 123, 112, 0.1);
+  --focus: #8fb2ff;
+
+  /* Syntax */
+  --syn-keyword: #c99bf0;
+  --syn-string: #9fcf8a;
+  --syn-comment: #5f6878;
+  --syn-number: #e8a66f;
+  --syn-function: #7fb8f0;
+  --syn-type: #6fd0c4;
+  --syn-decorator: #e3ae4f;
+  --syn-punct: #8b93a1;
+
+  /* Type */
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --fs-xs: 0.6875rem;
+  --fs-sm: 0.75rem;
+  --fs-md: 0.8125rem;
+  --fs-base: 0.875rem;
+  --fs-lg: 1rem;
+  --fs-xl: 1.25rem;
+  --fs-2xl: 1.625rem;
+
+  /* Space (4px grid) */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+
+  /* Radius: small for controls, none for panels */
+  --r-sm: 3px;
+  --r-md: 5px;
+  --r-lg: 8px;
+
+  --topbar-h: 44px;
+  --rail-w: 264px;
+  --evidence-w: clamp(360px, 34vw, 560px);
+  --shadow-pop: 0 12px 32px rgba(3, 6, 12, 0.55), 0 0 0 1px var(--border-strong);
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --t-fast: 120ms;
+  --t-med: 180ms;
+}

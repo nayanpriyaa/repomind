@@ -1,0 +1,156 @@
+.composer {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+
+.composer:focus-within {
+  border-color: #56627a;
+  box-shadow: 0 0 0 3px rgba(143, 178, 255, 0.12);
+}
+
+.composer.is-disabled {
+  opacity: 0.6;
+}
+
+.composer__input {
+  display: block;
+  width: 100%;
+  min-height: 56px;
+  max-height: 240px;
+  padding: var(--s-3) var(--s-4) var(--s-2);
+  border: 0;
+  background: transparent;
+  resize: vertical;
+  font-size: var(--fs-lg);
+  line-height: 1.5;
+  color: var(--text);
+  field-sizing: content;
+}
+
+.composer__input::placeholder {
+  color: var(--text-muted);
+}
+
+.composer__input:focus {
+  outline: none;
+}
+
+.composer__bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  padding: var(--s-2);
+  padding-left: var(--s-3);
+}
+
+.composer__spacer {
+  flex: 1;
+}
+
+.composer__topk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 4px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.composer__topk select {
+  border: 0;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.composer__topk select option {
+  background: var(--surface-raised);
+}
+
+.composer__hint {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.composer__reason {
+  font-size: var(--fs-sm);
+  color: var(--warning);
+}
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--r-md);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.segmented button {
+  height: 22px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast);
+}
+
+.segmented button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.segmented button.is-active {
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+
+.examples {
+  display: grid;
+  gap: var(--s-2);
+  margin-top: var(--s-6);
+}
+
+.examples__label {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.examples__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.examples__item {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-md);
+  text-align: left;
+  transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
+}
+
+.examples__item:hover {
+  border-color: var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+
+@media (max-width: 640px) {
+  .composer__hint {
+    display: none;
+  }
+}

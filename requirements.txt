@@ -1,0 +1,17 @@
+# CPU-only wheels. The extra index keeps torch from pulling multi-GB CUDA
+# packages, which is what makes the Docker image usable on a laptop or a
+# small VM.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+pydantic>=2.6,<3.0
+
+qdrant-client>=1.9,<2.0
+
+torch>=2.2,<3.0
+sentence-transformers>=2.7,<4.0
+
+tree-sitter>=0.22,<1.0
+tree-sitter-language-pack>=0.2
+python-multipart>=0.0.9

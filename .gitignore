@@ -1,0 +1,35 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime data
+data/*
+!data/.gitkeep
+repositories/*
+!repositories/.gitkeep
+evaluation/results*.json
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
