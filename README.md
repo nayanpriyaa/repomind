@@ -1,196 +1,488 @@
 # RepoMind
 
-Ask a codebase where things live, and get an answer that points at real files and
-line numbers.
+**RepoMind is a codebase Q&A and semantic-search system that lets you upload a repository, index its source structurally, and ask grounded questions with file-and-line evidence.**
 
-RepoMind indexes a local repository structurally (functions, classes, methods —
-not arbitrary 500-character slices), embeds those units, and answers questions
-using hybrid retrieval plus a language model that is forbidden from asserting
-anything the retrieved evidence does not show.
+Instead of treating a repository as a bag of arbitrary text windows, RepoMind parses source into meaningful units such as classes, functions, and methods, combines semantic and exact-match retrieval, and gives the LLM only retrieved evidence to reason over.
+
+> **Current local LLM:** Ollama + `qwen2.5-coder:7b`
+>
+> **Embeddings:** `sentence-transformers/all-MiniLM-L6-v2` (384-dimensional, CPU)
+>
+> **Vector store:** Qdrant
+>
+> **Keyword search:** SQLite FTS5 / BM25
 
 ---
 
-## The problem
+## Why RepoMind?
 
-Asking a general-purpose chat model about your repository fails in two specific
-ways:
+General-purpose chat models do not automatically know the contents of a private codebase. Naive RAG also has a structural problem: fixed-size text windows frequently split functions, classes, and declarations across unrelated chunks.
 
-1. **It does not have your code.** It answers from priors about how codebases
-   usually look, and the answer is fluent and wrong.
-2. **Naive RAG makes it worse.** Splitting source files into fixed-size text
-   windows cuts functions in half, so a retrieved chunk often contains a
-   signature with no body or a body with no name. Citations drift and the model
-   fills the gap with invention.
+RepoMind is designed around three principles:
 
-RepoMind addresses both: chunks follow the syntax tree, every answer is
-constrained to retrieved evidence, and every claim carries a `file:line-line`
-citation the reader can check in seconds.
+1. **Structure-aware indexing** — source is chunked around language constructs where possible.
+2. **Hybrid retrieval** — semantic similarity finds concepts while BM25 finds exact identifiers and symbols.
+3. **Grounded answers** — the generation prompt is built from retrieved repository evidence, and answers expose the files and line ranges used as evidence.
+
+The result is a workflow closer to **"ask the codebase"** than a generic chatbot.
+
+---
+
+## What it can do
+
+- Upload arbitrary `.zip` repositories through the web UI.
+- Safely extract archives into managed repository storage.
+- Assign repositories safe IDs instead of exposing filesystem paths through the API.
+- Parse supported source languages into structural chunks.
+- Incrementally index repositories using SHA-256 file hashes.
+- Store exact-search data in SQLite FTS5.
+- Store semantic vectors and citation metadata in Qdrant.
+- Fuse semantic and keyword results with Reciprocal Rank Fusion (RRF).
+- Ask natural-language questions about an indexed repository.
+- Return grounded answers with source files, symbols, and line ranges.
+- Inspect retrieved evidence directly in the UI.
+- Re-index changed repositories without rebuilding everything unnecessarily.
+- Delete a repository and its associated index state through the API/UI.
+- Run retrieval without invoking the LLM.
+- Run an offline test suite with LLM/vector-store stubs.
 
 ---
 
 ## Architecture
 
-```
-                    ┌──────────────────────────────┐
-                    │   React + TypeScript (Vite)  │
-                    └───────────────┬──────────────┘
-                                    │ HTTP
-                    ┌───────────────▼──────────────┐
-                    │      FastAPI  (api/)         │
-                    │  path allowlist, schemas     │
-                    └───────────────┬──────────────┘
-                                    │
-                    ┌───────────────▼──────────────┐
-                    │   ServiceContainer           │
-                    │   one embedder, one client   │
-                    └──┬─────────────┬─────────────┘
-                       │             │
-         ┌─────────────▼───┐    ┌────▼──────────────────┐
-         │  IngestionSvc   │    │     RagService        │
-         └────┬────────────┘    └────┬──────────────────┘
-              │                      │
-   scan → parse → embed         retrieve → context → prompt → LLM
-      │      │       │               │
-      │      │       │          ┌────▼─────────┐
-      │      │       │          │ RetrievalSvc │
-      │      │       │          │ semantic ────┼──► Qdrant
-      │      │       │          │ keyword  ────┼──► SQLite FTS5 (BM25)
-      │      │       │          │ hybrid   ────┼──► RRF fusion
-      │      │       │          └──────────────┘
-      │      │       └──────────────────────────► Qdrant  (vectors + payload)
-      │      └──────────────────────────────────► SQLite  (FTS5 index)
-      └─────────────────────────────────────────► SQLite  (file digests, chunks)
+```text
+                           Browser
+                              │
+                    React + TypeScript + Vite
+                              │
+                           HTTP / API
+                              │
+                              ▼
+                     ┌──────────────────┐
+                     │     FastAPI      │
+                     │  repository API  │
+                     └────────┬─────────┘
+                              │
+                       ServiceContainer
+                              │
+             ┌────────────────┼─────────────────┐
+             │                │                 │
+             ▼                ▼                 ▼
+        RepositoryStore   IngestionSvc       RagService
+             │                │                 │
+             │          scan → parse → embed    │
+             │                │                 │
+             │        ┌───────┴───────┐         │
+             │        ▼               ▼         │
+             │     SQLite           Qdrant      │
+             │     state + FTS5     vectors     │
+             │        │               │         │
+             │        └───────┬───────┘         │
+             │                │                 │
+             │                └── hybrid ───────┘
+             │                    retrieval
+             │                        │
+             │                        ▼
+             │                 Context + Prompt
+             │                        │
+             │                        ▼
+             │                Ollama / Qwen 2.5
+             │                        │
+             └────────────────────────┴─────────┐
+                                                ▼
+                                     Grounded answer + evidence
 ```
 
-Three storage responsibilities, deliberately separate:
+### Storage responsibilities
 
-| Store | Holds | Why |
+| Component | Stores | Purpose |
 |---|---|---|
-| SQLite `files`/`chunks` | SHA-256 digests, chunk coordinates | decides new / modified / unchanged / deleted |
-| SQLite FTS5 | chunk text, symbols, paths | exact-identifier search with BM25 |
-| Qdrant | vectors + citation payload | semantic similarity |
+| **RepositoryStore** | Uploaded/extracted repositories | Persistent source-code storage |
+| **SQLite** | File hashes, chunk metadata, index state | Incremental indexing and state tracking |
+| **SQLite FTS5** | Chunk text, paths, symbols | Exact identifier / keyword retrieval with BM25 |
+| **Qdrant** | Embeddings + citation payloads | Semantic retrieval |
+| **Ollama** | Local LLM | Answer generation |
+
+Uploaded repositories are stored in the Docker named volume mounted at `/repositories`. The uploaded ZIP is processed and extracted; the application does not execute repository code.
 
 ---
 
-## Features
+## Retrieval pipeline
 
-- Structural chunking: Python via the standard `ast`, C/C++/Java/JS/TS/TSX via
-  tree-sitter, Markdown by heading.
-- Incremental indexing driven by content hashes, with deterministic chunk IDs.
-- Hybrid retrieval: dense + BM25 fused with Reciprocal Rank Fusion.
-- Grounded answers with file and line citations, and an explicit "I don't have
-  the evidence" path.
-- Prompt-injection resistance: repository content is framed and sanitised as
-  untrusted data.
-- Repository-root allowlisting, traversal and symlink protection, secret-file
-  exclusion, size and count limits.
-- FastAPI service, React UI, Docker Compose with Qdrant, CLI, evaluation harness.
+A question follows this path:
+
+```text
+Question
+   │
+   ▼
+Query embedding + keyword query
+   │
+   ├──────────────► Qdrant semantic search
+   │
+   └──────────────► SQLite FTS5 / BM25
+                          │
+                          ▼
+                 Reciprocal Rank Fusion
+                          │
+                          ▼
+                    Top-k chunks
+                          │
+                          ▼
+                 Context construction
+                          │
+                          ▼
+                     LLM prompt
+                          │
+                          ▼
+                 Qwen 2.5 Coder 7B
+                          │
+                          ▼
+              Grounded answer + sources
+```
+
+### Why hybrid retrieval?
+
+Semantic search is useful for questions such as:
+
+> "How does the application prevent two users from booking the same seat?"
+
+BM25 is useful for exact identifiers such as:
+
+```text
+ERR_TOKEN_EXPIRED
+BookingService
+createBooking
+```
+
+RepoMind combines both retrieval modes with **Reciprocal Rank Fusion** rather than directly adding cosine-similarity and BM25 scores, since those scores are not naturally comparable.
+
+The UI exposes **Hybrid**, **Semantic**, and **Keyword** retrieval modes so retrieval behaviour can be inspected directly.
+
+---
+
+## Structural indexing
+
+RepoMind does not rely exclusively on arbitrary fixed-size windows.
+
+Current parsing support includes:
+
+- **Python** — standard-library `ast`
+- **C / C++** — tree-sitter based parsing
+- **Java** — tree-sitter based parsing
+- **JavaScript** — tree-sitter based parsing
+- **TypeScript / TSX** — tree-sitter based parsing
+- **Markdown** — heading-based chunking
+- Other supported/text-like files can fall back to line-based chunking when structural parsing is unavailable.
+
+A class and its methods can be represented separately so that retrieval can surface the method implementation without repeatedly embedding the entire class body.
+
+Chunk IDs are deterministic, allowing incremental re-indexing and safe upserts rather than accumulating duplicate vectors.
+
+---
+
+## Incremental indexing
+
+Index state is based on **SHA-256 content hashes**, rather than timestamps alone.
+
+| Repository change | Behaviour |
+|---|---|
+| New file | Parse → chunk → embed → store |
+| Unchanged file | Skip |
+| Modified file | Remove old chunks → reparse → re-embed → store |
+| Deleted file | Remove chunks and index state |
+
+The indexing pipeline is designed to be idempotent: repeating an indexing operation converges on the same state.
+
+There is currently no distributed transaction spanning SQLite and Qdrant, so a process failure during indexing can temporarily leave stale vector state. A subsequent index run can reconcile it.
+
+---
+
+## LLM: Ollama + Qwen 2.5 Coder
+
+RepoMind currently uses a local Ollama server rather than a hosted Gemini API.
+
+Default configuration:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_MODEL=qwen2.5-coder:7b
+LLM_TIMEOUT_SECONDS=120
+LLM_MAX_OUTPUT_TOKENS=1024
+```
+
+On Windows, Ollama runs on the host while the RepoMind API runs in Docker. `host.docker.internal` allows the container to reach the host's Ollama server.
+
+Verify Ollama before starting RepoMind:
+
+```powershell
+ollama list
+```
+
+You should have:
+
+```text
+qwen2.5-coder:7b
+```
+
+You can also test the host API directly:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://localhost:11434/api/generate" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"model":"qwen2.5-coder:7b","prompt":"Reply with exactly: Ollama works","stream":false}'
+```
+
+The model is not installed in the RepoMind Docker image. It remains managed by Ollama on the host or inference machine.
 
 ---
 
 ## Tech stack
 
-**Backend** Python 3.11+, FastAPI, Pydantic v2, Uvicorn, pytest
-**Parsing** Python `ast`, tree-sitter
-**Storage** SQLite (state + FTS5), Qdrant
-**Embeddings** sentence-transformers, default `all-MiniLM-L6-v2` (384-d, CPU)
-**LLM** Gemini via REST, behind an `LLMClient` protocol
-**Frontend** React 18, TypeScript, Vite
-**Infra** Docker, Docker Compose
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, TypeScript, Vite |
+| API | FastAPI, Pydantic v2, Uvicorn |
+| Parsing | Python `ast`, tree-sitter |
+| State / keyword retrieval | SQLite + FTS5 / BM25 |
+| Vector search | Qdrant |
+| Embeddings | Sentence Transformers — `all-MiniLM-L6-v2` |
+| LLM runtime | Ollama |
+| LLM | Qwen 2.5 Coder 7B |
+| Testing | pytest |
+| Packaging | setuptools / `pyproject.toml` |
+| Infrastructure | Docker Compose |
 
 ---
 
-## Setup
+## Project structure
 
-### Local
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env          # then fill in GEMINI_API_KEY
-
-docker run -p 6333:6333 -v "$PWD/data/qdrant:/qdrant/storage" qdrant/qdrant:v1.9.0
-
-export REPOSITORIES_ROOT="$PWD/repositories"
-export DATABASE_PATH="$PWD/data/repomind.db"
-export QDRANT_HOST=localhost
-
-uvicorn repomind.api.main:app --reload --port 8000
+```text
+RepoMind/
+├── src/repomind/
+│   ├── api/
+│   │   ├── main.py              # FastAPI application and repository API
+│   │   └── schemas.py           # Request/response models
+│   ├── container.py              # Shared service container
+│   ├── config.py                 # Environment-backed settings
+│   ├── uploads.py                # ZIP validation, extraction, repository store
+│   ├── ingestion.py              # Scan → parse → embed → persist
+│   ├── parser.py                 # Structural parsing/chunking
+│   ├── retrieval.py              # Semantic / keyword / hybrid retrieval
+│   ├── qdrant_store.py            # Qdrant integration
+│   ├── keyword_search.py          # SQLite FTS5 / BM25
+│   ├── embeddings.py              # Embedding model integration
+│   ├── rag.py                     # Retrieval → context → prompt → LLM
+│   ├── llm.py                     # LLM client abstraction + Ollama client
+│   ├── prompt.py                  # Grounding / prompt construction
+│   ├── index_state.py             # Incremental indexing state
+│   └── ...
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── services/
+│   │   └── ...
+│   └── package.json
+├── tests/
+├── evaluation/
+├── Dockerfile
+├── docker-compose.yml
+├── pyproject.toml
+└── .env.example
 ```
 
-### Docker
+---
 
-```bash
-cp .env.example .env          # GEMINI_API_KEY at minimum
-git clone <your-repo> repositories/example
+## Running locally with Docker
+
+### Prerequisites
+
+- Docker Desktop
+- Python 3.11+ for local development/testing
+- Node.js + npm for frontend development
+- Ollama installed on the host
+- `qwen2.5-coder:7b` available in Ollama
+
+### 1. Configure environment
+
+Copy the example file:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+For the current Docker + Ollama setup, use:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_MODEL=qwen2.5-coder:7b
+LLM_TIMEOUT_SECONDS=120
+LLM_MAX_OUTPUT_TOKENS=1024
+
+QDRANT_HOST=qdrant
+QDRANT_PORT=6333
+QDRANT_COLLECTION=repomind_chunks
+VECTOR_BACKEND=qdrant
+
+EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+EMBEDDING_BATCH_SIZE=32
+
+REPOSITORIES_ROOT=/repositories
+DATABASE_PATH=/data/repomind.db
+
+MAX_UPLOAD_BYTES=209715200
+MAX_EXTRACTED_BYTES=1073741824
+MAX_ARCHIVE_ENTRIES=100000
+
+CORS_ALLOW_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+LOG_LEVEL=INFO
+```
+
+### 2. Start the backend and Qdrant
+
+```powershell
 docker compose up --build
 ```
 
-The API listens on `http://localhost:8000`; OpenAPI docs are at `/docs`.
-Repositories are bind-mounted **read-only** — RepoMind never writes to or
-executes the code it analyses.
+The backend is available at:
 
-### Frontend
+```text
+http://localhost:8000
+```
 
-```bash
+FastAPI documentation:
+
+```text
+http://localhost:8000/docs
+```
+
+Qdrant is exposed locally at:
+
+```text
+http://localhost:6333
+```
+
+### 3. Start the frontend
+
+In another terminal:
+
+```powershell
 cd frontend
 npm install
-npm run dev        # http://localhost:5173, proxies /api to :8000
+npm run dev
 ```
+
+Open:
+
+```text
+http://localhost:5173
+```
+
+The frontend communicates with the API through the configured Vite proxy.
 
 ---
 
-## Environment variables
+## Repository uploads
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `QDRANT_HOST` / `QDRANT_PORT` | `localhost` / `6333` | vector store location |
-| `QDRANT_COLLECTION` | `repomind_chunks` | collection name |
-| `VECTOR_BACKEND` | `qdrant` | `memory` runs without Qdrant (nothing persists) |
-| `LLM_PROVIDER` | `gemini` | provider selector |
-| `GEMINI_API_KEY` | *(empty)* | unset ⇒ retrieval works, generation is disabled |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | model id |
-| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | `hashing` selects the offline encoder |
-| `REPOSITORIES_ROOT` | `/repositories` | **allowlist root — every path must resolve inside it** |
-| `DATABASE_PATH` | `/data/repomind.db` | SQLite state + FTS5 |
-| `MAX_FILE_BYTES` | `1048576` | per-file size ceiling |
-| `MAX_CONTEXT_CHARACTERS` | `24000` | evidence budget per question |
-| `RRF_K` | `60` | fusion constant |
-| `CORS_ALLOW_ORIGINS` | `http://localhost:5173` | comma-separated |
+The web application accepts `.zip` repositories.
 
-Full list in `.env.example`. Secrets are never logged; `Settings.gemini_api_key`
-is excluded from `repr`, and the Gemini key travels in a header rather than a
-URL so it cannot leak into access logs.
+```text
+ZIP upload
+    ↓
+archive validation
+    ↓
+safe staged extraction
+    ↓
+managed repository storage
+    ↓
+index
+    ↓
+Ask questions
+```
+
+The browser sends a repository file and optional display name. It does **not** send a filesystem path.
+
+Repositories are assigned safe IDs and stored beneath:
+
+```text
+/repositories/<repository_id>/
+```
+
+Inside Docker, `/repositories` is backed by the named volume:
+
+```text
+repomind-repositories
+```
+
+### Upload protections
+
+The upload path includes protections for:
+
+- maximum archive size
+- maximum extracted size
+- maximum archive entry count
+- compression-ratio limits
+- absolute-path rejection
+- `..` / traversal rejection
+- Windows path-separator rejection
+- symlink-member handling
+- staged extraction before final placement
+- duplicate repository detection
+
+Repository source is treated as data. RepoMind does not execute uploaded code.
 
 ---
 
 ## API
 
-```
-GET  /health                         liveness, touches nothing
-GET  /ready                          per-dependency readiness
-POST /repositories/index             index or incrementally re-index
-GET  /repositories/status            counts and languages for one repository
-GET  /repositories                   every indexed repository
-POST /repositories/query             grounded answer with citations
-POST /repositories/search            raw retrieval, no generation
-```
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness |
+| `GET` | `/ready` | Dependency readiness |
+| `GET` | `/repositories` | List stored repositories and index status |
+| `GET` | `/repositories/{id}` | Get one repository's status |
+| `POST` | `/repositories/upload` | Upload a ZIP repository |
+| `DELETE` | `/repositories/{id}` | Delete repository and index data |
+| `POST` | `/repositories/index` | Index / re-index a repository |
+| `POST` | `/repositories/query` | Ask a grounded question |
+| `POST` | `/repositories/search` | Raw retrieval without generation |
+
+Example upload:
 
 ```bash
-curl -X POST localhost:8000/repositories/query \
+curl -F 'file=@my-project.zip' http://localhost:8000/repositories/upload
+```
+
+Example indexing request:
+
+```bash
+curl -X POST http://localhost:8000/repositories/index \
+  -H 'Content-Type: application/json' \
+  -d '{"repository_id":"my-project","force":false}'
+```
+
+Example question:
+
+```bash
+curl -X POST http://localhost:8000/repositories/query \
   -H 'Content-Type: application/json' \
   -d '{
-        "repository_path": "/repositories/example",
-        "question": "Where is authentication implemented?",
-        "top_k": 5,
-        "mode": "hybrid"
-      }'
+    "repository_id":"my-project",
+    "question":"Where is authentication implemented?",
+    "top_k":5,
+    "mode":"hybrid"
+  }'
 ```
+
+A successful response contains the generated answer plus source metadata such as:
 
 ```json
 {
   "question": "Where is authentication implemented?",
-  "answer": "Authentication is handled by TokenService in app/auth.py:8-24 ...",
+  "answer": "Authentication is handled by TokenService...",
   "mode": "hybrid",
   "grounded": true,
   "chunks_used": 4,
@@ -209,122 +501,129 @@ curl -X POST localhost:8000/repositories/query \
 }
 ```
 
-### CLI
+---
 
-```bash
-python -m repomind index  /repositories/example
-python -m repomind search /repositories/example "token validation" --mode keyword
-python -m repomind query  /repositories/example "How are sessions invalidated?"
-python -m repomind status /repositories/example
-```
+## Frontend workflow
+
+The UI is organized around the codebase-analysis workflow:
+
+1. **Upload** a repository ZIP.
+2. **Index** the repository.
+3. Select the repository from the left panel.
+4. Ask a question in **Ask** mode.
+5. Choose **Hybrid**, **Semantic**, or **Keyword** retrieval.
+6. Inspect the generated answer.
+7. Inspect the retrieved evidence and source file/line ranges.
+8. Switch to **Retrieval** mode when you want to inspect search results without generation.
+
+For example, after indexing a repository such as SeatFlow, RepoMind can answer questions about booking flow, concurrency, services, APIs, and implementation details while exposing the retrieved source evidence beside the answer.
 
 ---
 
-## Frontend usage
+## Security model
 
-Enter a repository path, index it, then ask. The left rail shows live index
-state (files, chunks, languages, last run, per-service health); the main column
-holds the question, the retrieval-mode switch, the answer, and the citation list.
-Citations get the strongest visual treatment on the page because verifying them
-is the workflow.
+RepoMind is designed to treat uploaded repositories as untrusted input.
 
----
-
-## Retrieval architecture
-
-**Chunking.** A class does not swallow its methods. The class chunk carries the
-declaration, docstring and class-level attributes; each method is its own chunk.
-Storing the class body twice would waste index space and blur the embedding.
-Module-level code (imports, constants, script bodies) is preserved as contiguous
-`MODULE` chunks with true line ranges. Fixed-size windowing exists only as a
-fallback for files that fail to parse — a syntax error degrades one file, never
-the run.
-
-**Embedded text.** Each chunk is embedded with a metadata header
-(`path | kind symbol`) prepended to its body, because file paths and symbol names
-carry real signal for "where is X" questions.
-
-**Semantic.** Cosine similarity over Qdrant, with payload indexes on
-`repository_path`, `file_path`, `language` and `chunk_type` so repository
-filtering does not degrade into a full scan.
-
-**Keyword.** SQLite FTS5 with BM25, column weights `symbol 6 : path 2 : content 1`.
-Identifiers are stored both verbatim and camel/snake-split, so `getUserToken`
-matches `user` and `token`. Query terms are extracted with a whitelist regex and
-re-quoted, which makes FTS5 operator injection impossible.
-
-**Why both.** Embeddings are poor at exact identifiers — asking for
-`ERR_TOKEN_EXPIRED` returns "something about authentication". BM25 is poor at
-paraphrase — "how do we keep people logged in" matches nothing. Each covers the
-other's failure mode.
-
-### Hybrid retrieval
-
-Reciprocal Rank Fusion, not a weighted score sum:
-
-```
-score(d) = Σ  1 / (k + rank(d, list))      k = 60
-```
-
-Cosine similarity (≈0–1) and BM25 (unbounded, corpus-dependent) are not
-comparable quantities, and per-query normalisation is unstable when one list is
-short or empty. RRF consumes only ranks, so it is immune to both problems. Each
-backend is queried for `max(3 × top_k, 20)` candidates so fusion has room to
-promote a document that ranks moderately well in both lists over one that ranks
-first in only one. `k = 60` is the value from Cormack et al.; smaller `k` lets a
-single list dominate, larger `k` flattens the advantage of top ranks.
-
-Every result is returned with `match_type` (`semantic` / `keyword` / `hybrid`)
-and its per-backend rank, so retrieval behaviour is inspectable rather than a
-black box.
-
----
-
-## Incremental indexing
-
-State is keyed on SHA-256 of file content, not mtime or size, so a touched file
-is correctly skipped and a reverted file is correctly recognised as unchanged.
-
-| Case | Action |
+| Control | Behaviour |
 |---|---|
-| New file | parse → embed → store |
-| Unchanged digest | skip entirely |
-| Changed digest | delete old chunks from all three stores → reparse → re-embed → store |
-| Missing from scan | delete chunks and state |
+| Repository IDs | API clients never provide arbitrary filesystem paths |
+| Root containment | Resolved repository paths must remain inside `REPOSITORIES_ROOT` |
+| ZIP traversal protection | Rejects unsafe archive member paths |
+| Symlink handling | Symlink archive members are not used to escape storage |
+| Archive limits | Size, entry count, expansion and compression-ratio limits |
+| Atomic upload | Extraction occurs in staging before final placement |
+| Secret exclusion | Sensitive repository files are excluded from scanning |
+| No code execution | Repository files are parsed/read, never imported or executed |
+| Prompt injection resistance | Repository content is framed as untrusted evidence |
+| CORS | Explicit frontend origin allowlist |
+| Container isolation | API and Qdrant run in separate containers |
 
-Chunk IDs are UUIDv5 over `(repository, path, kind, symbol, start, end)`. They
-are deterministic — so upserts replace instead of duplicating — and UUID-shaped,
-which Qdrant requires for point IDs.
+### Important deployment note
 
-There is no distributed transaction across SQLite and Qdrant. Instead the
-pipeline is **idempotent**: deletes always precede writes, IDs are stable, and
-re-running after a partial failure converges to the correct state.
+The current upload/indexing architecture is suitable for a controlled deployment or portfolio/demo environment, but a public multi-user deployment should additionally add authentication, rate limiting, resource quotas, background indexing, and stronger tenant isolation.
+
+---
+
+## Configuration
+
+Important environment variables:
+
+| Variable | Current/default purpose |
+|---|---|
+| `LLM_PROVIDER` | `ollama` |
+| `OLLAMA_BASE_URL` | Ollama endpoint, e.g. `http://host.docker.internal:11434` |
+| `OLLAMA_MODEL` | `qwen2.5-coder:7b` |
+| `LLM_TIMEOUT_SECONDS` | LLM request timeout |
+| `LLM_MAX_OUTPUT_TOKENS` | Maximum generated output |
+| `QDRANT_HOST` / `QDRANT_PORT` | Qdrant service location |
+| `QDRANT_COLLECTION` | `repomind_chunks` |
+| `VECTOR_BACKEND` | `qdrant` |
+| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` |
+| `EMBEDDING_BATCH_SIZE` | Embedding batch size |
+| `REPOSITORIES_ROOT` | `/repositories` |
+| `DATABASE_PATH` | `/data/repomind.db` |
+| `MAX_UPLOAD_BYTES` | 200 MiB archive limit |
+| `MAX_EXTRACTED_BYTES` | 1 GiB extraction limit |
+| `MAX_ARCHIVE_ENTRIES` | 100,000 archive members |
+| `MAX_CONTEXT_CHARACTERS` | Evidence/context budget |
+| `DEFAULT_TOP_K` | Default retrieval depth |
+| `MAX_TOP_K` | Maximum retrieval depth |
+| `RRF_K` | RRF fusion constant |
+| `CORS_ALLOW_ORIGINS` | Allowed frontend origins |
+| `LOG_LEVEL` | Application logging level |
+
+See `.env.example` for the complete configuration surface.
+
+Never commit `.env` or credentials to Git.
 
 ---
 
 ## Testing
 
-```bash
-pytest -m "not integration"      # unit + API, no external services
-pytest -m integration            # requires a running Qdrant
+Run the non-integration suite:
+
+```powershell
+pytest -m "not integration"
 ```
 
-The suite runs entirely offline: an in-memory vector store and a deterministic
-hashing embedder stand in for Qdrant and sentence-transformers, and the LLM is a
-stub that records the prompts it receives. Coverage includes scanner edge cases
-(binary, invalid UTF-8, symlinks, secrets, size and count limits), AST chunk
-shapes and line accuracy, the full new/modified/unchanged/deleted state machine,
-BM25 ranking and FTS injection attempts, RRF arithmetic and tie-breaking, context
-budgeting and deduplication, prompt-injection containment, Gemini error handling
-and key hygiene, path-traversal rejection, and the HTTP contract end to end.
+Run Qdrant integration tests when Qdrant is available:
 
-Tests assert behaviour, not importability — for example, that a modified file
-leaves no orphaned chunks, and that a file containing `</evidence>` cannot close
-the evidence block in the prompt.
+```powershell
+pytest -m integration
+```
+
+Frontend checks:
+
+```powershell
+cd frontend
+npm run typecheck
+npm run build
+```
+
+The test suite covers areas including:
+
+- scanner edge cases
+- archive validation and upload safety
+- structural parsing
+- incremental indexing
+- file hashing
+- SQLite FTS5 retrieval
+- Qdrant vector storage
+- hybrid/RRF retrieval
+- context construction
+- prompt grounding and injection resistance
+- LLM client behaviour
+- API contracts
+
+The LLM is stubbed in unit/API tests, so Ollama is not required to run the normal test suite.
 
 ---
 
 ## Evaluation
+
+The repository includes an evaluation harness under `evaluation/`.
+
+Example:
 
 ```bash
 python -m evaluation.benchmark \
@@ -333,70 +632,73 @@ python -m evaluation.benchmark \
   --output evaluation/results.json
 ```
 
-Reports, per mode (`keyword`, `semantic`, `hybrid`): Recall@1/@3/@5, MRR@5,
-Hit Rate@5, mean and p95 retrieval latency. Separately times a full rebuild, a
-no-op re-index and a single-file change, which is how the incremental path is
-measured rather than assumed.
+The evaluation harness can measure retrieval quality using metrics such as Recall@k, MRR, hit rate, and retrieval latency.
 
-Relevance is judged at file granularity, which suits the question this system
-answers ("where is X implemented"). Write your own `queries.json` against a
-repository you know well; the bundled file is a format example.
-
-> **No benchmark numbers are published here.** The harness has been executed only
-> against a three-file synthetic fixture using the offline hashing encoder, which
-> measures nothing about real retrieval quality. Publishing numbers from that run
-> would be dishonest. Run it on your own corpus with a real embedding model.
-
----
-
-## Security
-
-| Control | Implementation |
-|---|---|
-| Repository allowlist | every path resolved through `Settings.resolve_repository_path`, rejected unless it is inside `REPOSITORIES_ROOT` |
-| Path traversal | `Path.resolve()` then containment check; `../`, absolute paths and symlinked escapes all rejected |
-| Symlinks | never followed during scanning; symlinked files and directories are skipped outright |
-| Secret exclusion | `.env*`, `*.pem`, `*.key`, `id_rsa`, keystores and similar are never read |
-| Resource limits | per-file byte ceiling, per-repository file ceiling, context character budget |
-| No execution | repository code is read as text and never imported, evaluated or run |
-| Prompt injection | evidence delimiters neutralised in content, untrusted-data framing in the system prompt, question cannot close its own tag |
-| Secrets in logs | API key excluded from `repr`, sent as a header, provider error bodies never echoed |
-| Error responses | identical message for "outside root" and "does not exist", so the API cannot be used to probe the host filesystem |
-| CORS | explicit origin allowlist, credentials disabled, methods limited to GET/POST |
-| Container | non-root user, read-only repository mount, CPU-only wheels |
+Do not treat synthetic/offline benchmark results as evidence of production retrieval quality; evaluate against a representative codebase and manually inspect grounded answers as well.
 
 ---
 
 ## Limitations
 
-- Retrieval is chunk-level; it does not follow call graphs or resolve imports, so
-  "what calls this function" is answered by lexical coincidence rather than
-  analysis.
-- Cross-file reasoning is limited by the context budget. Questions spanning many
-  files get partial evidence.
-- Tree-sitter node rules cover the common declaration forms per language, not
-  every grammar corner (macro-heavy C++, decorators-as-declarations in TS).
-- Markdown is chunked by heading; other config formats fall back to line windows.
-- Consistency between SQLite and Qdrant is convergent, not transactional: a crash
-  mid-file can leave a stale vector until the next index run.
-- One embedding model per collection. Changing `EMBEDDING_MODEL` to a different
-  dimension requires recreating the collection — this is detected and refused
-  rather than silently corrupting the index.
-- Indexing is synchronous. A very large repository blocks its request for the
-  duration; a job queue would be the next step.
+- Retrieval is chunk-level and does not currently construct a complete call graph or import graph.
+- Cross-file reasoning is limited by the retrieval/context budget.
+- Parser rules do not cover every grammar corner of every supported language.
+- SQLite and Qdrant are convergent rather than transactionally coupled.
+- One embedding model/dimension is used for the Qdrant collection; changing embedding dimensions requires recreating/reindexing the collection.
+- Indexing is currently synchronous, so a large repository can keep an HTTP request open for a significant amount of time.
+- Uploads are whole-archive uploads rather than resumable/chunked uploads.
+- Only ZIP archive upload is currently supported; Git URL and `tar.gz` import are not part of the current upload workflow.
+- Local Ollama inference speed depends heavily on available CPU/GPU/RAM.
 
-## Future improvements
+---
 
-- Import-graph and call-graph edges as retrieval signals.
-- A reranker (cross-encoder) over fused candidates.
-- Background indexing with progress streaming over SSE.
-- Per-repository collections and multi-tenant isolation.
-- Answer-level citation verification: check that every `file:line` the model
-  emits actually appeared in the evidence, and flag it when it did not.
-- Git-aware indexing: index by commit, diff between revisions.
+## Roadmap
+
+Potential next improvements:
+
+- Background indexing jobs with progress reporting / SSE.
+- Authentication and per-user repository isolation.
+- Rate limiting and resource quotas for public deployments.
+- Import/call-graph retrieval signals.
+- Cross-encoder reranking.
+- Citation verification against retrieved evidence.
+- Git URL and `tar.gz` imports.
+- Git-aware indexing by commit and diff.
+- More robust multi-tenant persistence and object storage.
+- GPU-backed hosted inference for lower query latency.
+
+---
+
+## Docker persistence
+
+The Docker deployment uses named volumes for persistent state:
+
+```text
+repomind-repositories   uploaded/extracted repositories
+repomind-data           SQLite database
+qdrant-data             Qdrant vectors
+model-cache             model/cache data where applicable
+```
+
+A normal:
+
+```powershell
+docker compose down
+```
+
+does **not** remove named volumes.
+
+Avoid:
+
+```powershell
+docker compose down -v
+```
+
+unless you intentionally want to delete the persisted Docker volumes and rebuild the stored data from scratch.
 
 ---
 
 ## License
 
 MIT
+
